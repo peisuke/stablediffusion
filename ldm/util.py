@@ -9,7 +9,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def autocast(f):
+    # デコレーター：関数を自動的にミックス精度で実行するために使用されます。
     def do_autocast(*args, **kwargs):
+        # PyTorchの自動キャストを有効にして、指定された関数を実行します。
         with torch.cuda.amp.autocast(enabled=True,
                                      dtype=torch.get_autocast_gpu_dtype(),
                                      cache_enabled=torch.is_autocast_cache_enabled()):
@@ -19,6 +21,8 @@ def autocast(f):
 
 
 def log_txt_as_img(wh, xc, size=10):
+    # この関数はテキストをイメージに変換します。
+    # wh は (幅, 高さ) のタプル、xc はプロットするキャプションのリストです。
     # wh a tuple of (width, height)
     # xc a list of captions to plot
     b = len(xc)
@@ -43,22 +47,26 @@ def log_txt_as_img(wh, xc, size=10):
 
 
 def ismap(x):
+    # xが4次元のテンソルで、2次元目のサイズが3より大きい場合にTrueを返します。
     if not isinstance(x, torch.Tensor):
         return False
     return (len(x.shape) == 4) and (x.shape[1] > 3)
 
 
 def isimage(x):
+    # xが画像のテンソル表現かどうかを判定します。
     if not isinstance(x,torch.Tensor):
         return False
     return (len(x.shape) == 4) and (x.shape[1] == 3 or x.shape[1] == 1)
 
 
 def exists(x):
+    # xがNoneではない場合にTrueを返します。
     return x is not None
 
 
 def default(val, d):
+    # valが存在する場合はvalを返し、そうでない場合はdを返します。
     if exists(val):
         return val
     return d() if isfunction(d) else d
@@ -66,13 +74,14 @@ def default(val, d):
 
 def mean_flat(tensor):
     """
+    テンソルの非バッチ次元にわたる平均を取ります。
     https://github.com/openai/guided-diffusion/blob/27c20a8fab9cb472df5d6bdd6c8d11c8f430b924/guided_diffusion/nn.py#L86
-    Take the mean over all non-batch dimensions.
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 
 def count_params(model, verbose=False):
+    # モデルのパラメータの総数を計算します。
     total_params = sum(p.numel() for p in model.parameters())
     if verbose:
         print(f"{model.__class__.__name__} has {total_params*1.e-6:.2f} M params.")
@@ -80,6 +89,7 @@ def count_params(model, verbose=False):
 
 
 def instantiate_from_config(config):
+    # 設定からオブジェクトをインスタンス化します。
     if not "target" in config:
         if config == '__is_first_stage__':
             return None
@@ -90,6 +100,7 @@ def instantiate_from_config(config):
 
 
 def get_obj_from_str(string, reload=False):
+    # 文字列からオブジェクトを取得します
     module, cls = string.rsplit(".", 1)
     if reload:
         module_imp = importlib.import_module(module)
@@ -99,10 +110,24 @@ def get_obj_from_str(string, reload=False):
 
 class AdamWwithEMAandWings(optim.Optimizer):
     # credit to https://gist.github.com/crowsonkb/65f7265353f403714fce3b2595e0b298
+    # AdamW最適化アルゴリズムをベースに、EMA（Exponential Moving Average）を組み込んだカスタム最適化器
     def __init__(self, params, lr=1.e-3, betas=(0.9, 0.999), eps=1.e-8,  # TODO: check hyperparameters before using
                  weight_decay=1.e-2, amsgrad=False, ema_decay=0.9999,   # ema decay to match previous code
                  ema_power=1., param_names=()):
-        """AdamW that saves EMA versions of the parameters."""
+        """
+        AdamWのパラメータとEMA関連の設定を初期化します。
+        :param params: 最適化対象のパラメータ
+        :param lr: 学習率
+        :param betas: Adamのベータ係数（モーメンタム項）
+        :param eps: 数値安定性のための小さな値
+        :param weight_decay: 重み減衰率
+        :param amsgrad: AMSGradバリアントを使用するかどうか
+        :param ema_decay: EMAの減衰率
+        :param ema_power: EMAのパワー（調整用）
+        :param param_names: パラメータ名（オプション）
+        """
+
+        # 入力値のバリデーション
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -121,16 +146,16 @@ class AdamWwithEMAandWings(optim.Optimizer):
         super().__init__(params, defaults)
 
     def __setstate__(self, state):
+        # オプティマイザの状態を設定します。
         super().__setstate__(state)
         for group in self.param_groups:
             group.setdefault('amsgrad', False)
 
     @torch.no_grad()
     def step(self, closure=None):
-        """Performs a single optimization step.
-        Args:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
+        """
+        単一の最適化ステップを実行します。
+        :param closure: モデルを再評価して損失を返すクロージャ
         """
         loss = None
         if closure is not None:
@@ -138,6 +163,7 @@ class AdamWwithEMAandWings(optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
+            # 各種パラメータと状態を初期化
             params_with_grad = []
             grads = []
             exp_avgs = []
@@ -200,6 +226,7 @@ class AdamWwithEMAandWings(optim.Optimizer):
                     eps=group['eps'],
                     maximize=False)
 
+            # EMAの計算と更新
             cur_ema_decay = min(ema_decay, 1 - state['step'] ** -ema_power)
             for param, ema_param in zip(params_with_grad, ema_params_with_grad):
                 ema_param.mul_(cur_ema_decay).add_(param.float(), alpha=1 - cur_ema_decay)

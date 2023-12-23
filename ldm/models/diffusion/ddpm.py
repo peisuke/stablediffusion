@@ -44,69 +44,89 @@ def uniform_on_device(r1, r2, shape, device):
 
 
 class DDPM(pl.LightningModule):
-    # classic DDPM with Gaussian diffusion, in image space
-    def __init__(self,
-                 unet_config,
-                 timesteps=1000,
-                 beta_schedule="linear",
-                 loss_type="l2",
-                 ckpt_path=None,
-                 ignore_keys=[],
-                 load_only_unet=False,
-                 monitor="val/loss",
-                 use_ema=True,
-                 first_stage_key="image",
-                 image_size=256,
-                 channels=3,
-                 log_every_t=100,
-                 clip_denoised=True,
-                 linear_start=1e-4,
-                 linear_end=2e-2,
-                 cosine_s=8e-3,
-                 given_betas=None,
-                 original_elbo_weight=0.,
-                 v_posterior=0.,  # weight for choosing posterior variance as sigma = (1-v) * beta_tilde + v * beta
-                 l_simple_weight=1.,
-                 conditioning_key=None,
-                 parameterization="eps",  # all assuming fixed variance schedules
-                 scheduler_config=None,
-                 use_positional_encodings=False,
-                 learn_logvar=False,
-                 logvar_init=0.,
-                 make_it_fit=False,
-                 ucg_training=None,
-                 reset_ema=False,
-                 reset_num_ema_updates=False,
-                 ):
+    """
+    ガウス拡散を用いたクラシックなDDPM（Denoising Diffusion Probabilistic Models）の実装。
+    画像空間での拡散と復元プロセスを扱います。
+    """
+
+    def __init__(self, unet_config, timesteps=1000, beta_schedule="linear", loss_type="l2",
+                 ckpt_path=None, ignore_keys=[], load_only_unet=False, monitor="val/loss",
+                 use_ema=True, first_stage_key="image", image_size=256, channels=3, log_every_t=100,
+                 clip_denoised=True, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3,
+                 given_betas=None, original_elbo_weight=0., v_posterior=0.,
+                 l_simple_weight=1., conditioning_key=None, parameterization="eps",
+                 scheduler_config=None, use_positional_encodings=False, learn_logvar=False,
+                 logvar_init=0., make_it_fit=False, ucg_training=None, reset_ema=False,
+                 reset_num_ema_updates=False):
+        """
+        コンストラクタ。
+        :param unet_config: U-Netモデルの設定
+        :param timesteps: 拡散プロセスのタイムステップ数
+        :param beta_schedule: βのスケジューリング方法（"linear", "cosine"など）
+        :param loss_type: 損失関数の種類（"l2", "l1"など）
+        :param ckpt_path: モデルのチェックポイントパス
+        :param ignore_keys: チェックポイントから無視するキー
+        :param load_only_unet: U-Netのみをロードするかどうか
+        :param monitor: 監視する値（例：'val/loss'）
+        :param use_ema: 指数移動平均（EMA）を使用するかどうか
+        :param first_stage_key: 最初のステージのキー
+        :param image_size: 画像のサイズ
+        :param channels: チャンネル数
+        :param log_every_t: ログを取るタイミング
+        :param clip_denoised: 復元された画像をクリップするかどうか
+        :param linear_start: 線形スケジューリングの開始値
+        :param linear_end: 線形スケジューリングの終了値
+        :param cosine_s: コサインスケジューリングのパラメータ
+        :param given_betas: 与えられたβの値
+        :param original_elbo_weight: ELBOの重み
+        :param v_posterior: 後続分布の分散の重み
+        :param l_simple_weight: 簡単な損失の重み
+        :param conditioning_key: 条件付けのキー
+        :param parameterization: パラメータ化の方法（"eps", "x0", "v"）
+        :param scheduler_config: スケジューラの設定
+        :param use_positional_encodings: 位置エンコーディングを使用するかどうか
+        :param learn_logvar: 対数分散を学習するかどうか
+        :param logvar_init: 対数分散の初期値
+        :param make_it_fit: メモリにフィットさせるためのフラグ
+        :param ucg_training: UCGトレーニングの設定
+        :param reset_ema: EMAをリセットするかどうか
+        :param reset_num_ema_updates: EMAの更新回数をリセットするかどうか
+        """
         super().__init__()
+        # パラメータ化の方法をチェック
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
+        # 条件付けステージモデルの初期化
         self.cond_stage_model = None
+        # 各種設定の初期化
         self.clip_denoised = clip_denoised
         self.log_every_t = log_every_t
         self.first_stage_key = first_stage_key
-        self.image_size = image_size  # try conv?
+        self.image_size = image_size
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
+        # DiffusionWrapperモデルの初期化
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         count_params(self.model, verbose=True)
+        # EMAの設定
         self.use_ema = use_ema
         if self.use_ema:
             self.model_ema = LitEma(self.model)
             print(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
-
+        # スケジューラの設定
         self.use_scheduler = scheduler_config is not None
         if self.use_scheduler:
             self.scheduler_config = scheduler_config
-
+        # 各種重みの設定
         self.v_posterior = v_posterior
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
-
+        # モニターの設定
         if monitor is not None:
             self.monitor = monitor
         self.make_it_fit = make_it_fit
+        # チェックポイントとEMAのリセット
         if reset_ema: assert exists(ckpt_path)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
@@ -118,23 +138,33 @@ class DDPM(pl.LightningModule):
             print(" +++++++++++ WARNING: RESETTING NUM_EMA UPDATES TO ZERO +++++++++++ ")
             assert self.use_ema
             self.model_ema.reset_num_updates()
-
+        # 拡散スケジュールの登録
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
                                linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
-
+        # 損失タイプの設定
         self.loss_type = loss_type
-
+        # 対数分散の設定
         self.learn_logvar = learn_logvar
         self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
-
+        # UCGトレーニングの設定
         self.ucg_training = ucg_training or dict()
         if self.ucg_training:
             self.ucg_prng = np.random.RandomState()
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+        """
+        拡散プロセスのスケジュールを登録する関数。
+        :param given_betas: 与えられたベータの配列（省略可能）
+        :param beta_schedule: ベータのスケジューリング方法（'linear', 'cosine'など）
+        :param timesteps: 拡散プロセスのタイムステップ数
+        :param linear_start: 線形スケジュールの開始値
+        :param linear_end: 線形スケジュールの終了値
+        :param cosine_s: コサインスケジュールのパラメータ
+        """
+        # 与えられたベータがある場合はそれを使用し、なければスケジュールに基づいて生成
         if exists(given_betas):
             betas = given_betas
         else:
@@ -152,29 +182,29 @@ class DDPM(pl.LightningModule):
 
         to_torch = partial(torch.tensor, dtype=torch.float32)
 
+        # 拡散スケジュールに関連するパラメータをバッファとして登録
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
+        # 拡散q(x_t | x_{t-1})に関連する計算
         self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
         self.register_buffer('log_one_minus_alphas_cumprod', to_torch(np.log(1. - alphas_cumprod)))
         self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
         self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        # 後続分布q(x_{t-1} | x_t, x_0)に関連する計算
         posterior_variance = (1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
                 1. - alphas_cumprod) + self.v_posterior * betas
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(posterior_variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1', to_torch(
             betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2', to_torch(
             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
 
+        # LVLB重みの計算（損失関数に関連）
         if self.parameterization == "eps":
             lvlb_weights = self.betas ** 2 / (
                     2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
@@ -191,39 +221,62 @@ class DDPM(pl.LightningModule):
 
     @contextmanager
     def ema_scope(self, context=None):
+        """
+        EMA（Exponential Moving Average）重みを一時的に適用するためのコンテキストマネージャー。
+        :param context: コンテキスト（オプション、デバッグやロギングに使用）
+        """
+        # EMAを使用する場合
         if self.use_ema:
+            # 現在のモデルのパラメータを保存
             self.model_ema.store(self.model.parameters())
+            # EMA重みをモデルにコピー
             self.model_ema.copy_to(self.model)
+            # コンテキストが指定されている場合、コンソールにメッセージを表示
             if context is not None:
                 print(f"{context}: Switched to EMA weights")
         try:
+            # コンテキストマネージャー内の処理を実行
             yield None
         finally:
+            # EMAを使用する場合
             if self.use_ema:
+                # 保存しておいた元のモデルのパラメータを復元
                 self.model_ema.restore(self.model.parameters())
+                # コンテキストが指定されている場合、コンソールにメッセージを表示
                 if context is not None:
                     print(f"{context}: Restored training weights")
 
     @torch.no_grad()
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+        """
+        チェックポイントからモデルの重みを初期化するメソッド。指定されたパスからチェックポイントをロードし、モデルの重みを初期化します。
+
+        :param path: チェックポイントのファイルパス
+        :param ignore_keys: 無視するキーのリスト（オプション）
+        :param only_model: Trueの場合、モデルのみを初期化（オプション）
+        """
+        # チェックポイントをCPU上にロード
         sd = torch.load(path, map_location="cpu")
         if "state_dict" in list(sd.keys()):
             sd = sd["state_dict"]
+
+        # チェックポイントから読み込むキーのリストを取得
         keys = list(sd.keys())
+
+        # 無視するキーが指定されている場合、該当するキーを削除
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
+
+        # make_it_fitオプションが有効な場合、新しいモデルの重みに古い重みを合わせる
         if self.make_it_fit:
-            n_params = len([name for name, _ in
-                            itertools.chain(self.named_parameters(),
-                                            self.named_buffers())])
+            n_params = len([name for name in itertools.chain(self.named_parameters(), self.named_buffers())])
             for name, param in tqdm(
-                    itertools.chain(self.named_parameters(),
-                                    self.named_buffers()),
-                    desc="Fitting old weights to new weights",
-                    total=n_params
+                itertools.chain(self.named_parameters(), self.named_buffers()),
+                desc="Fitting old weights to new weights",
+                total=n_params
             ):
                 if not name in sd:
                     continue
@@ -231,9 +284,9 @@ class DDPM(pl.LightningModule):
                 new_shape = param.shape
                 assert len(old_shape) == len(new_shape)
                 if len(new_shape) > 2:
-                    # we only modify first two axes
+                    # 最初の2つの軸のみを変更する
                     assert new_shape[2:] == old_shape[2:]
-                # assumes first axis corresponds to output dim
+                # 最初の軸が出力次元に対応していると仮定
                 if not new_shape == old_shape:
                     new_param = param.clone()
                     old_param = sd[name]
@@ -259,8 +312,8 @@ class DDPM(pl.LightningModule):
 
                     sd[name] = new_param
 
-        missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
-            sd, strict=False)
+        # モデルの重みをロード（only_modelがTrueの場合はモデルのみ）
+        missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(sd, strict=False)
         print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
         if len(missing) > 0:
             print(f"Missing Keys:\n {missing}")
