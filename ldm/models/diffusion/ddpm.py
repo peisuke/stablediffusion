@@ -327,115 +327,254 @@ class DDPM(pl.LightningModule):
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A tuple (mean, variance, log_variance), all of x_start's shape.
         """
+
+        # この式は、時間ステップtにおける平均を計算します。x_startはノイズがない初期の入力画像です。
+        # self.sqrt_alphas_cumprodは、各拡散ステップにおける平方根の累積積です。
         mean = (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start)
+
+        # この式は、時間ステップtにおける分散を計算します。
+        # self.alphas_cumprodは、各拡散ステップにおける累積積です。
         variance = extract_into_tensor(1.0 - self.alphas_cumprod, t, x_start.shape)
+
+        # この式は、時間ステップtにおける分散の対数を計算します。
+        # self.log_one_minus_alphas_cumprodは、1から各アルファの累積積を引いた値の対数です。
         log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
+
         return mean, variance, log_variance
 
     def predict_start_from_noise(self, x_t, t, noise):
+        """
+        ノイズが加えられた画像から、ノイズがない元の画像を推測する。
+        :param x_t: ノイズが加えられた画像（テンソル形式）。
+        :param t: 拡散のステップ数。
+        :param noise: 加えられたノイズ。
+        :return: 推測されたノイズがない元の画像。
+        """
+        # 拡散の逆プロセスにおいて、ノイズがない元の画像を推定します。
+        # self.sqrt_recip_alphas_cumprodは、拡散ステップにおけるアルファの累積積の平方根の逆数です。
+        # self.sqrt_recipm1_alphas_cumprodは、アルファの累積積の1からの差の平方根の逆数です。
         return (
                 extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
                 extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
-
+    
     def predict_start_from_z_and_v(self, x_t, t, v):
-        # self.register_buffer('sqrt_alphas_cumprod', to_torch(np.sqrt(alphas_cumprod)))
-        # self.register_buffer('sqrt_one_minus_alphas_cumprod', to_torch(np.sqrt(1. - alphas_cumprod)))
+        """
+        ノイズ除去された画像と潜在変数から、ノイズがない元の画像を推測する。
+        :param x_t: 拡散後の画像（テンソル形式）。
+        :param t: 拡散のステップ数。
+        :param v: 潜在変数。
+        :return: 推測されたノイズがない元の画像。
+        """
+        # self.sqrt_alphas_cumprodは、拡散ステップにおけるアルファの累積積の平方根です。
+        # self.sqrt_one_minus_alphas_cumprodは、1からアルファの累積積を引いた値の平方根です。
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
-
+    
     def predict_eps_from_z_and_v(self, x_t, t, v):
+        """
+        拡散後の画像と潜在変数から、加えられたノイズを推測する。
+        :param x_t: 拡散後の画像（テンソル形式）。
+        :param t: 拡散のステップ数。
+        :param v: 潜在変数。
+        :return: 推測されたノイズ。
+        """
+        # この関数は、拡散プロセス中に加えられたノイズを推測するために使用されます。
+        # self.sqrt_alphas_cumprodとself.sqrt_one_minus_alphas_cumprodは上述の通りです。
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x_t.shape) * v +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * x_t
         )
 
     def q_posterior(self, x_start, x_t, t):
+        """
+        拡散プロセス中の特定のステップにおける事後分布を計算する。
+        :param x_start: ノイズがない元の画像。
+        :param x_t: 拡散プロセス中の特定のステップにおける画像。
+        :param t: 拡散のステップ数。
+        :return: 事後分布の平均、分散、および分散の対数。
+        """
+        # 事後分布の平均を計算します。この計算は、元の画像と拡散プロセス中の画像に基づいています。
         posterior_mean = (
                 extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
                 extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
+    
+        # 事後分布の分散を計算します。
         posterior_variance = extract_into_tensor(self.posterior_variance, t, x_t.shape)
+    
+        # 事後分布の分散の対数を計算します。分散の対数は、数値的安定性のためにクリップされることがあります。
         posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
-
+    
     def p_mean_variance(self, x, t, clip_denoised: bool):
+        """
+        モデルによる出力から、再構築された画像の推定値と、事後分布のパラメータを計算する。
+        :param x: 拡散プロセス中の特定のステップにおける画像。
+        :param t: 拡散のステップ数。
+        :param clip_denoised: 再構築された画像をクリップするかどうかのフラグ。
+        :return: モデルによる推定値、事後分布の分散、事後分布の分散の対数。
+        """
         model_out = self.model(x, t)
+    
+        # モデルの出力に基づいて、ノイズ除去された画像を再構築します。
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
             x_recon = model_out
+    
+        # 再構築された画像が指定された範囲内に収まるようにクリップします。
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
-
+    
+        # 再構築された画像を使用して、事後分布のパラメータを計算します。
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
-
+    
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
+        """
+        逆拡散プロセスにおいて、1ステップ分のサンプリングを行う。
+        :param x: 現在の拡散画像。
+        :param t: 拡散のステップ数。
+        :param clip_denoised: 再構築された画像をクリップするかどうかのフラグ。
+        :param repeat_noise: 同じノイズを繰り返すかどうかのフラグ。
+        :return: 次のステップにおける画像。
+        """
         b, *_, device = *x.shape, x.device
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+
+        # 画像に適用するノイズを生成します。
         noise = noise_like(x.shape, device, repeat_noise)
-        # no noise when t == 0
+
+        # t == 0の時はノイズを加えません。
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
     def p_sample_loop(self, shape, return_intermediates=False):
+        """
+        逆拡散プロセス全体を通して画像をサンプリングする。
+        :param shape: 生成する画像の形状。
+        :param return_intermediates: 中間画像を返すかどうかのフラグ。
+        :return: 生成された画像、（オプションで）中間画像のリスト。
+        """
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
         intermediates = [img]
+
+        # 逆拡散プロセスを順次実行していきます。
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
                                 clip_denoised=self.clip_denoised)
+
+            # 指定された間隔で中間結果を記録します。
             if i % self.log_every_t == 0 or i == self.num_timesteps - 1:
                 intermediates.append(img)
+
+        # 中間画像も返す場合は、最終画像と共に返します。
         if return_intermediates:
             return img, intermediates
         return img
 
     @torch.no_grad()
     def sample(self, batch_size=16, return_intermediates=False):
+        """
+        画像を生成するためのメイン関数。バッチサイズと中間結果の返却設定に基づいて、画像をサンプリングする。
+        :param batch_size: 生成する画像のバッチサイズ。
+        :param return_intermediates: 中間画像を返すかどうかのフラグ。
+        :return: サンプリングされた画像、オプションで中間画像のリスト。
+        """
         image_size = self.image_size
         channels = self.channels
+        # p_sample_loop関数を用いて、画像をサンプリングします。
         return self.p_sample_loop((batch_size, channels, image_size, image_size),
                                   return_intermediates=return_intermediates)
 
     def q_sample(self, x_start, t, noise=None):
+        """
+        拡散プロセスをシミュレートするための関数。元の画像とノイズを組み合わせて、特定の拡散ステップでの画像を生成する。
+        :param x_start: ノイズがない元の画像。
+        :param t: 拡散のステップ数。
+        :param noise: 追加するノイズ（オプション）。指定されていない場合はランダムノイズが生成される。
+        :return: 拡散プロセスによって生成された画像。
+        """
+        # ノイズが指定されていない場合はランダムノイズを生成します。
         noise = default(noise, lambda: torch.randn_like(x_start))
+        # 拡散プロセスをシミュレートします。ここでの計算は、元の画像とノイズを適切な比率で混合することによって行われます。
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
 
+
     def get_v(self, x, noise, t):
+        """
+        拡散プロセス中の特定のステップでの潜在変数vを計算する。
+        :param x: 拡散プロセス中の特定のステップにおける画像。
+        :param noise: 加えられたノイズ。
+        :param t: 拡散のステップ数。
+        :return: 計算された潜在変数v。
+        """
+        # 拡散プロセス中に加えられたノイズと、そのステップでの画像から潜在変数vを計算します。
+        # self.sqrt_alphas_cumprodは、拡散ステップにおけるアルファの累積積の平方根です。
+        # self.sqrt_one_minus_alphas_cumprodは、1からアルファの累積積を引いた値の平方根です。
         return (
                 extract_into_tensor(self.sqrt_alphas_cumprod, t, x.shape) * noise -
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
         )
 
     def get_loss(self, pred, target, mean=True):
+        """
+        モデルの予測とターゲットとの間の損失を計算する。
+        :param pred: モデルによる予測値。
+        :param target: 実際の目標値。
+        :param mean: 損失の平均を取るかどうかのフラグ。
+        :return: 計算された損失。
+        """
+        # L1損失（絶対値損失）を使用する場合
         if self.loss_type == 'l1':
+            # 予測とターゲットとの差の絶対値を取る
             loss = (target - pred).abs()
+
+            # 損失の平均を取る場合
             if mean:
                 loss = loss.mean()
+
+        # L2損失（平均二乗誤差）を使用する場合
         elif self.loss_type == 'l2':
+            # 損失の平均を取る場合
             if mean:
                 loss = torch.nn.functional.mse_loss(target, pred)
             else:
+                # 平均を取らず、各要素の損失を保持する
                 loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+
+        # 未知の損失タイプが指定された場合は例外を投げる
         else:
-            raise NotImplementedError("unknown loss type '{loss_type}'")
+            raise NotImplementedError(f"unknown loss type '{self.loss_type}'")
 
         return loss
 
     def p_losses(self, x_start, t, noise=None):
+        """
+        モデルの損失を計算する。モデルの出力とターゲットに基づいて、様々な損失を計算する。
+        :param x_start: ノイズがない元の画像。
+        :param t: 拡散のステップ数。
+        :param noise: 加えられたノイズ（オプション）。指定されていない場合はランダムノイズが生成される。
+        :return: 計算された損失と、損失に関する情報を含む辞書。
+        """
+        # ノイズが指定されていない場合はランダムノイズを生成する。
         noise = default(noise, lambda: torch.randn_like(x_start))
+        # 拡散プロセスに基づいて、ノイズが加えられた画像を生成する。
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        # モデルを用いて、ノイズが加えられた画像から出力を生成する。
         model_out = self.model(x_noisy, t)
 
         loss_dict = {}
+
+        # モデルのパラメータ化に基づいて、ターゲットを設定する。
         if self.parameterization == "eps":
             target = noise
         elif self.parameterization == "x0":
@@ -443,61 +582,106 @@ class DDPM(pl.LightningModule):
         elif self.parameterization == "v":
             target = self.get_v(x_start, noise, t)
         else:
+            # サポートされていないパラメータ化が指定された場合は例外を投げる。
             raise NotImplementedError(f"Parameterization {self.parameterization} not yet supported")
 
+        # 損失を計算する。
         loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
 
+        # トレーニング中か検証中かに基づいてログのプレフィックスを設定する。
         log_prefix = 'train' if self.training else 'val'
 
+        # 単純な損失を計算し、ログに記録する。
         loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
         loss_simple = loss.mean() * self.l_simple_weight
 
+        # 変分下限(Variational Lower Bound)の損失を計算し、ログに記録する。
         loss_vlb = (self.lvlb_weights[t] * loss).mean()
         loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
 
+        # 総損失を計算する。
         loss = loss_simple + self.original_elbo_weight * loss_vlb
 
+        # 総損失を辞書に追加する。
         loss_dict.update({f'{log_prefix}/loss': loss})
 
         return loss, loss_dict
 
     def forward(self, x, *args, **kwargs):
-        # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
-        # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
+        """
+        モデルのフォワードパス。入力データを受け取り、損失計算関数を呼び出して損失を計算する。
+        :param x: 入力データ。
+        :param args: 追加の位置引数。
+        :param kwargs: 追加のキーワード引数。
+        :return: 損失計算関数からの出力。
+        """
+        # ランダムに拡散ステップ数を選択する。
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        # 損失計算関数を呼び出す。
         return self.p_losses(x, t, *args, **kwargs)
-
+    
     def get_input(self, batch, k):
+        """
+        バッチから入力データを取得し、適切な形式に変換する。
+        :param batch: データバッチ。
+        :param k: バッチ内のキー。
+        :return: 処理された入力データ。
+        """
+        # バッチから入力データを取得する。
         x = batch[k]
+        # 入力が3次元の場合（例えば、チャネルが欠けている場合）、チャネル次元を追加する。
         if len(x.shape) == 3:
             x = x[..., None]
+        # データを適切な形式に変換する（バッチ、チャネル、高さ、幅）。
         x = rearrange(x, 'b h w c -> b c h w')
+        # データを適切なメモリ形式に変換し、float型にキャストする。
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
-
+    
     def shared_step(self, batch):
+        """
+        トレーニングまたは検証ステップで共通に行われる処理。入力データを取得し、モデルに渡して損失を計算する。
+        :param batch: データバッチ。
+        :return: 計算された損失と、損失に関する情報を含む辞書。
+        """
+        # 入力データを取得する。
         x = self.get_input(batch, self.first_stage_key)
+        # モデルのフォワードパスを実行し、損失と損失辞書を取得する。
         loss, loss_dict = self(x)
         return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
+        """
+        トレーニングの各ステップで実行される処理。
+        バッチデータの前処理、損失の計算、ログの記録を行う。
+        :param batch: トレーニングバッチ。
+        :param batch_idx: バッチのインデックス。
+        :return: 計算された損失。
+        """
+        # データの前処理：特定の条件に基づいて、バッチ内のデータを変更する。
         for k in self.ucg_training:
             p = self.ucg_training[k]["p"]
             val = self.ucg_training[k]["val"]
+            # valがNoneの場合、空の文字列に置き換える。
             if val is None:
                 val = ""
+            # バッチ内の各要素に対して、確率pに基づいて、値をvalに置き換える。
             for i in range(len(batch[k])):
                 if self.ucg_prng.choice(2, p=[1 - p, p]):
                     batch[k][i] = val
 
+        # 共通のステップを実行して損失を計算する。
         loss, loss_dict = self.shared_step(batch)
 
+        # 損失に関する情報をログに記録する。
         self.log_dict(loss_dict, prog_bar=True,
                       logger=True, on_step=True, on_epoch=True)
 
+        # グローバルステップ数をログに記録する。
         self.log("global_step", self.global_step,
                  prog_bar=True, logger=True, on_step=True, on_epoch=False)
 
+        # 学習率スケジューラを使用している場合は、現在の学習率をログに記録する。
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
@@ -506,55 +690,105 @@ class DDPM(pl.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        """
+        バリデーションステップの処理。バッチデータに対して損失を計算し、EMA（指数移動平均）と非EMAの両方の損失をログに記録する。
+        :param batch: バリデーションバッチ。
+        :param batch_idx: バッチのインデックス。
+        """
+        # EMAを使用しない場合の損失計算
         _, loss_dict_no_ema = self.shared_step(batch)
+
+        # EMAを使用した場合の損失計算
         with self.ema_scope():
             _, loss_dict_ema = self.shared_step(batch)
+            # EMA損失のキーに '_ema' を追加
             loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
+
+        # 非EMAおよびEMAの損失をログに記録
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
     def on_train_batch_end(self, *args, **kwargs):
+        """
+        トレーニングバッチが終了するたびに呼び出される処理。EMA（指数移動平均）の更新を行う。
+        """
+        # EMAを使用する場合、モデルのEMAを更新
         if self.use_ema:
             self.model_ema(self.model)
 
     def _get_rows_from_list(self, samples):
+        """
+        画像サンプルのリストを行形式で整理する。画像グリッドを生成する。
+        :param samples: 画像サンプルのリスト。
+        :return: 整理された画像グリッド。
+        """
         n_imgs_per_row = len(samples)
+        # サンプルを行形式に再配置
         denoise_grid = rearrange(samples, 'n b c h w -> b n c h w')
         denoise_grid = rearrange(denoise_grid, 'b n c h w -> (b n) c h w')
+        # n_imgs_per_rowの数に基づいて画像グリッドを生成
         denoise_grid = make_grid(denoise_grid, nrow=n_imgs_per_row)
         return denoise_grid
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=2, sample=True, return_keys=None, **kwargs):
+        """
+        バッチから画像を取得し、拡散過程とデノイズ過程のサンプルをログとして生成する。
+        :param batch: データバッチ。
+        :param N: ログに記録する画像の最大数。
+        :param n_row: 拡散過程の画像を表示する行数。
+        :param sample: デノイズ過程のサンプルを生成するかどうか。
+        :param return_keys: 返却するログのキー。
+        :param kwargs: 追加のキーワード引数。
+        :return: 生成されたログの辞書。
+        """
         log = dict()
+        # 入力データを取得し、ログに記録する。
         x = self.get_input(batch, self.first_stage_key)
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
         x = x.to(self.device)[:N]
         log["inputs"] = x
 
-        # get diffusion row
+        # 拡散過程の行を生成する。
         diffusion_row = list()
         x_start = x[:n_row]
 
         for t in range(self.num_timesteps):
+            """
+            拡散プロセスの各ステップを順にサンプリングするループ。
+            拡散はnum_timestepsステップにわたって進行する。
+            """
             if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
+                """
+                拡散プロセスの特定のステップをログとして記録する。
+                log_every_tごとのステップ、または最後のステップの場合に処理を行う。
+                """
+                # 拡散ステップの数値tをテンソルに変換し、それをバッチサイズ（n_row）の数だけ繰り返す。
                 t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
+                # テンソルを適切なデバイス（CPUまたはGPU）に移動し、整数型に変換。
                 t = t.to(self.device).long()
+
+                # 入力画像x_startに対してランダムノイズを生成。
                 noise = torch.randn_like(x_start)
+
+                # 拡散プロセスをシミュレートして、ノイズが加えられた画像を生成。
                 x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+
+                # 生成されたノイズが加えられた画像を拡散行リストに追加。
                 diffusion_row.append(x_noisy)
 
         log["diffusion_row"] = self._get_rows_from_list(diffusion_row)
 
+        # サンプリングが有効な場合、デノイズ過程のサンプルを生成する。
         if sample:
-            # get denoise row
             with self.ema_scope("Plotting"):
                 samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
 
             log["samples"] = samples
             log["denoise_row"] = self._get_rows_from_list(denoise_row)
 
+        # 特定のキーに基づいてログを返却する。
         if return_keys:
             if np.intersect1d(list(log.keys()), return_keys).shape[0] == 0:
                 return log
@@ -563,16 +797,33 @@ class DDPM(pl.LightningModule):
         return log
 
     def configure_optimizers(self):
+        """
+        モデルのオプティマイザーを設定する。
+        ここで設定されたオプティマイザーは、モデルのトレーニングに使用される。
+        :return: 設定されたオプティマイザー。
+        """
+        # 学習率を取得する。
         lr = self.learning_rate
+
+        # モデルのパラメータを取得する。
         params = list(self.model.parameters())
+
+        # learn_logvarフラグがTrueの場合、logvarパラメータもオプティマイザーに含める。
         if self.learn_logvar:
             params = params + [self.logvar]
+
+        # オプティマイザーとしてAdamWを使用し、取得したパラメータと学習率で初期化する。
         opt = torch.optim.AdamW(params, lr=lr)
+
+        # 設定されたオプティマイザーを返す。
         return opt
 
 
 class LatentDiffusion(DDPM):
-    """main class"""
+    """
+    DDPMの拡張クラスであり、追加の機能と設定を提供する。
+    主に条件付き生成タスクに使用される。
+    """
 
     def __init__(self,
                  first_stage_config,
@@ -587,11 +838,27 @@ class LatentDiffusion(DDPM):
                  scale_by_std=False,
                  force_null_conditioning=False,
                  *args, **kwargs):
+        """
+        コンストラクタ。クラスの初期化時に呼び出される。
+        :param first_stage_config: 最初のステージの設定。
+        :param cond_stage_config: 条件付けステージの設定。
+        :param num_timesteps_cond: 条件付けに用いるタイムステップの数。
+        :param cond_stage_key: 条件付けステージのキー。
+        :param cond_stage_trainable: 条件付けステージがトレーニング可能かどうか。
+        :param concat_mode: 連結モードを使用するかどうか。
+        :param cond_stage_forward: 条件付けステージのフォワード関数。
+        :param conditioning_key: 条件付けのキー。
+        :param scale_factor: スケールファクター。
+        :param scale_by_std: 標準偏差によるスケーリングを使用するかどうか。
+        :param force_null_conditioning: null条件付けを強制するかどうか。
+        :param args: 追加の位置引数。
+        :param kwargs: 追加のキーワード引数。
+        """
         self.force_null_conditioning = force_null_conditioning
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
-        # for backwards compatibility after implementation of DiffusionWrapper
+        # 互換性を保つための条件付けキーの設定
         if conditioning_key is None:
             conditioning_key = 'concat' if concat_mode else 'crossattn'
         if cond_stage_config == '__is_unconditional__' and not self.force_null_conditioning:
@@ -604,6 +871,7 @@ class LatentDiffusion(DDPM):
         self.concat_mode = concat_mode
         self.cond_stage_trainable = cond_stage_trainable
         self.cond_stage_key = cond_stage_key
+        # 最初のステージの構成を取得
         try:
             self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
         except:
@@ -612,26 +880,26 @@ class LatentDiffusion(DDPM):
             self.scale_factor = scale_factor
         else:
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
+        # 最初のステージと条件付けステージの初期化
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None
 
+        # チェックポイントからの再開処理
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
             if reset_ema:
                 assert self.use_ema
-                print(
-                    f"Resetting ema to pure model weights. This is useful when restoring from an ema-only checkpoint.")
+                print("EMAを純粋なモデルの重みにリセットします。EMAのみのチェックポイントから復元する場合に便利です。")
                 self.model_ema = LitEma(self.model)
         if reset_num_ema_updates:
-            print(" +++++++++++ WARNING: RESETTING NUM_EMA UPDATES TO ZERO +++++++++++ ")
+            print("警告: NUM_EMA UPDATESをゼロにリセットします。")
             assert self.use_ema
             self.model_ema.reset_num_updates()
-
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
@@ -640,60 +908,110 @@ class LatentDiffusion(DDPM):
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
-        # only for very first batch
+        """
+        トレーニングの各バッチの開始時に呼び出されるメソッド。
+        特に、最初のエポックの最初のバッチで標準偏差によるリスケーリングを行う。
+        :param batch: 現在のバッチデータ。
+        :param batch_idx: 現在のバッチのインデックス。
+        :param dataloader_idx: 使用されているデータローダーのインデックス。
+        """
+        # 標準偏差によるスケーリングが有効で、かつ最初のエポックの最初のバッチである場合に処理を行う
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
-            assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
-            # set rescale weight to 1./std of encodings
-            print("### USING STD-RESCALING ###")
+            # カスタムリスケーリングと標準偏差リスケーリングを同時に使用しないようアサート
+            assert self.scale_factor == 1., 'カスタムリスケーリングと標準偏差リスケーリングを同時に使用するのは推奨されません'
+
+            # リスケールの重みをエンコーディングの標準偏差の逆数に設定
+            print("### 標準偏差リスケーリングを使用します ###")
             x = super().get_input(batch, self.first_stage_key)
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x)
             z = self.get_first_stage_encoding(encoder_posterior).detach()
+
+            # scale_factorを削除し、新しい値で登録
             del self.scale_factor
             self.register_buffer('scale_factor', 1. / z.flatten().std())
-            print(f"setting self.scale_factor to {self.scale_factor}")
-            print("### USING STD-RESCALING ###")
+            print(f"self.scale_factorを{self.scale_factor}に設定しました")
+            print("### 標準偏差リスケーリングを使用します ###")
 
     def register_schedule(self,
                           given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+        """
+        拡散プロセスのスケジュールを登録するメソッド。
+        :param given_betas: 事前に定義されたベータ値のリスト（オプション）。
+        :param beta_schedule: ベータ値のスケジュールタイプ（"linear"または"cosine"）。
+        :param timesteps: 拡散プロセスの総ステップ数。
+        :param linear_start: 線形スケジュールの開始値。
+        :param linear_end: 線形スケジュールの終了値。
+        :param cosine_s: コサインスケジュールのs値。
+        """
+        # 親クラスのregister_scheduleメソッドを呼び出し、ベータ値のスケジュールを登録する。
         super().register_schedule(given_betas, beta_schedule, timesteps, linear_start, linear_end, cosine_s)
 
+        # 条件付けスケジュールを短縮するかどうかを判断するフラグを設定する。
         self.shorten_cond_schedule = self.num_timesteps_cond > 1
         if self.shorten_cond_schedule:
+            # 条件付けスケジュールを作成する。
             self.make_cond_schedule()
 
     def instantiate_first_stage(self, config):
+        """
+        最初のステージのモデルをインスタンス化するメソッド。
+        :param config: モデルの設定。
+        """
+        # 設定に基づいてモデルをインスタンス化する。
         model = instantiate_from_config(config)
+
+        # モデルを評価モードに設定し、トレーニングを無効にする。
         self.first_stage_model = model.eval()
         self.first_stage_model.train = disabled_train
+
+        # モデルの全パラメータの勾配計算を無効にする。
         for param in self.first_stage_model.parameters():
             param.requires_grad = False
 
     def instantiate_cond_stage(self, config):
+        """
+        条件付けステージのモデルをインスタンス化するメソッド。
+        :param config: 条件付けステージの設定。
+        """
+        # 条件付けステージがトレーニング可能でない場合
         if not self.cond_stage_trainable:
             if config == "__is_first_stage__":
-                print("Using first stage also as cond stage.")
+                # 最初のステージのモデルを条件付けステージとして使用する。
+                print("最初のステージのモデルを条件付けステージとして使用します。")
                 self.cond_stage_model = self.first_stage_model
             elif config == "__is_unconditional__":
-                print(f"Training {self.__class__.__name__} as an unconditional model.")
+                # 条件付けを行わないモデルとしてトレーニングする。
+                print(f"{self.__class__.__name__} を条件付けなしのモデルとしてトレーニングします。")
                 self.cond_stage_model = None
-                # self.be_unconditional = True
             else:
+                # 設定に基づいて条件付けステージのモデルをインスタンス化し、評価モードに設定する。
                 model = instantiate_from_config(config)
                 self.cond_stage_model = model.eval()
                 self.cond_stage_model.train = disabled_train
+                # モデルの全パラメータの勾配計算を無効にする。
                 for param in self.cond_stage_model.parameters():
                     param.requires_grad = False
         else:
+            # 条件付けステージがトレーニング可能である場合
             assert config != '__is_first_stage__'
             assert config != '__is_unconditional__'
+            # 設定に基づいて条件付けステージのモデルをインスタンス化する。
             model = instantiate_from_config(config)
             self.cond_stage_model = model
 
     def _get_denoise_row_from_list(self, samples, desc='', force_no_decoder_quantization=False):
+        """
+        リストからノイズ除去された画像の行を取得するメソッドです。
+        :param samples: ノイズ除去されたサンプル画像のリスト。
+        :param desc: 進行状況の説明（オプション）。
+        :param force_no_decoder_quantization: デコーダの量子化を強制しないフラグ（オプション）。
+        :return: ノイズ除去された画像の行。
+        """
         denoise_row = []
         for zd in tqdm(samples, desc=desc):
+            # 最初のステージのデコードを使用してノイズ除去を行い、結果をリストに追加します。
             denoise_row.append(self.decode_first_stage(zd.to(self.device),
                                                        force_not_quantize=force_no_decoder_quantization))
         n_imgs_per_row = len(denoise_row)
@@ -704,86 +1022,159 @@ class LatentDiffusion(DDPM):
         return denoise_grid
 
     def get_first_stage_encoding(self, encoder_posterior):
+        """
+        最初のステージのエンコーディングを取得するメソッドです。
+        :param encoder_posterior: エンコーダの事後分布。
+        :return: スケールファクターを適用したエンコーディング。
+        """
         if isinstance(encoder_posterior, DiagonalGaussianDistribution):
+            # エンコーダの事後分布が対角ガウス分布の場合、サンプリングを行います。
             z = encoder_posterior.sample()
         elif isinstance(encoder_posterior, torch.Tensor):
+            # エンコーダの事後分布がテンソルの場合、そのまま使用します。
             z = encoder_posterior
         else:
+            # その他の場合は未実装のエラーを発生させます。
             raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
         return self.scale_factor * z
 
     def get_learned_conditioning(self, c):
+        """
+        学習済みのコンディショニングを取得するメソッド。
+        このメソッドは、与えられたコンディショニング情報を処理し、
+        条件付けステージのモデルを通して、適切な形式に変換します。
+        :param c: コンディショニング情報。
+        :return: 変換後の学習済みのコンディショニング。
+        """
+        # 条件付けステージのフォワード関数が定義されていない場合
         if self.cond_stage_forward is None:
+            # 条件付けステージのモデルにencodeメソッドがあり、それが呼び出し可能であれば、そのメソッドを使用する。
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
                 c = self.cond_stage_model.encode(c)
+                # エンコードされた結果がDiagonalGaussianDistribution型であれば、そのモード（平均）を使用する。
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
             else:
+                # encodeメソッドがない場合は、モデルに直接コンディショニング情報を渡す。
                 c = self.cond_stage_model(c)
         else:
+            # 条件付けステージのフォワード関数が定義されている場合、その関数を使用する。
             assert hasattr(self.cond_stage_model, self.cond_stage_forward)
             c = getattr(self.cond_stage_model, self.cond_stage_forward)(c)
         return c
 
     def meshgrid(self, h, w):
+        """
+        2次元のメッシュグリッドを作成するメソッド。
+        このメソッドは、指定された高さ(h)と幅(w)に基づいて、各点の座標を含むグリッドを生成します。
+        :param h: グリッドの高さ。
+        :param w: グリッドの幅。
+        :return: 作成されたメッシュグリッド。各要素は[y, x]形式の座標。
+        """
+        # 高さ方向の座標を生成し、適切な形状に変形する。
         y = torch.arange(0, h).view(h, 1, 1).repeat(1, w, 1)
+        # 幅方向の座標を生成し、適切な形状に変形する。
         x = torch.arange(0, w).view(1, w, 1).repeat(h, 1, 1)
 
+        # 高さ方向と幅方向の座標を結合し、最終的なメッシュグリッドを形成する。
         arr = torch.cat([y, x], dim=-1)
         return arr
 
     def delta_border(self, h, w):
         """
-        :param h: height
-        :param w: width
-        :return: normalized distance to image border,
-         wtith min distance = 0 at border and max dist = 0.5 at image center
+        画像の各ピクセルの境界までの距離を計算するメソッド。
+        距離は正規化され、境界で最小値0、画像中心で最大値0.5をとる。
+        :param h: 画像の高さ。
+        :param w: 画像の幅。
+        :return: 画像の各ピクセルから最も近い境界までの正規化された距離。
         """
+        # 右下のコーナーの座標を計算。
         lower_right_corner = torch.tensor([h - 1, w - 1]).view(1, 1, 2)
+
+        # メッシュグリッドを生成し、右下のコーナーの座標で正規化。
         arr = self.meshgrid(h, w) / lower_right_corner
+
+        # 左上端からの距離を計算。
         dist_left_up = torch.min(arr, dim=-1, keepdims=True)[0]
+
+        # 右下端からの距離を計算。
         dist_right_down = torch.min(1 - arr, dim=-1, keepdims=True)[0]
+
+        # 左上と右下の距離のうち小さい方を選択し、最終的な境界距離を計算。
         edge_dist = torch.min(torch.cat([dist_left_up, dist_right_down], dim=-1), dim=-1)[0]
+
         return edge_dist
 
     def get_weighting(self, h, w, Ly, Lx, device):
+        """
+        画像と低解像度の特徴マップ間の重み付けを計算するメソッド。
+        :param h: 元の画像の高さ。
+        :param w: 元の画像の幅。
+        :param Ly: 低解像度特徴マップの高さ。
+        :param Lx: 低解像度特徴マップの幅。
+        :param device: 使用するデバイス（CPUまたはGPU）。
+        :return: 計算された重み付け。
+        """
+        # 画像の境界までの距離を基に重み付けを計算する。
         weighting = self.delta_border(h, w)
+
+        # 重み付けを指定された範囲内でクリップする。
         weighting = torch.clip(weighting, self.split_input_params["clip_min_weight"],
-                               self.split_input_params["clip_max_weight"], )
+                               self.split_input_params["clip_max_weight"])
+
+        # 重み付けを適切な形状に変形し、指定されたデバイスに移動する。
         weighting = weighting.view(1, h * w, 1).repeat(1, 1, Ly * Lx).to(device)
 
+        # タイブレーカーが有効な場合、追加の重み付けを計算する。
         if self.split_input_params["tie_braker"]:
+            # 低解像度特徴マップの境界までの距離を基に重み付けを計算する。
             L_weighting = self.delta_border(Ly, Lx)
             L_weighting = torch.clip(L_weighting,
                                      self.split_input_params["clip_min_tie_weight"],
                                      self.split_input_params["clip_max_tie_weight"])
 
+            # 重み付けを適切な形状に変形し、指定されたデバイスに移動する。
             L_weighting = L_weighting.view(1, 1, Ly * Lx).to(device)
+
+            # 元の重み付けと追加の重み付けを組み合わせる。
             weighting = weighting * L_weighting
+
         return weighting
 
-    def get_fold_unfold(self, x, kernel_size, stride, uf=1, df=1):  # todo load once not every time, shorten code
+    def get_fold_unfold(self, x, kernel_size, stride, uf=1, df=1):
         """
-        :param x: img of size (bs, c, h, w)
-        :return: n img crops of size (n, bs, c, kernel_size[0], kernel_size[1])
+        画像の畳み込みと展開（fold/unfold）操作を行うメソッド。
+        画像の畳み込み（fold）と展開（unfold）操作を提供します。これにより、画像をカーネルサイズに基づいた小さなパッチに分割し、
+        それらのパッチを処理した後に元の画像サイズに戻すことができます。また、異なるアップスケール係数（uf）とダウンスケール係数（df）に
+        対応するための複数の設定が用意されています。これにより、畳み込みと展開の操作を様々な解像度の画像に適用することが可能です。
+        重み付けと正規化は、これらの操作の均等性を確保するために使用されます。
+        :param x: 入力画像（サイズは (bs, c, h, w)）。
+        :param kernel_size: カーネルのサイズ。
+        :param stride: ストライドのサイズ。
+        :param uf: 展開のアップスケール係数。
+        :param df: 畳み込みのダウンスケール係数。
+        :return: 畳み込みと展開の操作、正規化、重み付け。
         """
         bs, nc, h, w = x.shape
 
-        # number of crops in image
+        # 画像内のクロップ数を計算
         Ly = (h - kernel_size[0]) // stride[0] + 1
         Lx = (w - kernel_size[1]) // stride[1] + 1
 
+        # 展開と畳み込みのパラメータ設定
         if uf == 1 and df == 1:
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
             unfold = torch.nn.Unfold(**fold_params)
-
             fold = torch.nn.Fold(output_size=x.shape[2:], **fold_params)
 
+            # 重み付けと正規化
             weighting = self.get_weighting(kernel_size[0], kernel_size[1], Ly, Lx, x.device).to(x.dtype)
-            normalization = fold(weighting).view(1, 1, h, w)  # normalizes the overlap
+            normalization = fold(weighting).view(1, 1, h, w)
             weighting = weighting.view((1, 1, kernel_size[0], kernel_size[1], Ly * Lx))
 
+        # ufが1より大きく、dfが1の場合
         elif uf > 1 and df == 1:
+            # 展開と畳み込みの設定
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
             unfold = torch.nn.Unfold(**fold_params)
 
@@ -792,11 +1183,14 @@ class LatentDiffusion(DDPM):
                                 stride=(stride[0] * uf, stride[1] * uf))
             fold = torch.nn.Fold(output_size=(x.shape[2] * uf, x.shape[3] * uf), **fold_params2)
 
+            # 重み付けと正規化
             weighting = self.get_weighting(kernel_size[0] * uf, kernel_size[1] * uf, Ly, Lx, x.device).to(x.dtype)
-            normalization = fold(weighting).view(1, 1, h * uf, w * uf)  # normalizes the overlap
+            normalization = fold(weighting).view(1, 1, h * uf, w * uf)
             weighting = weighting.view((1, 1, kernel_size[0] * uf, kernel_size[1] * uf, Ly * Lx))
 
+        # dfが1より大きく、ufが1の場合
         elif df > 1 and uf == 1:
+            # 展開と畳み込みの設定
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
             unfold = torch.nn.Unfold(**fold_params)
 
@@ -805,8 +1199,9 @@ class LatentDiffusion(DDPM):
                                 stride=(stride[0] // df, stride[1] // df))
             fold = torch.nn.Fold(output_size=(x.shape[2] // df, x.shape[3] // df), **fold_params2)
 
+            # 重み付けと正規化
             weighting = self.get_weighting(kernel_size[0] // df, kernel_size[1] // df, Ly, Lx, x.device).to(x.dtype)
-            normalization = fold(weighting).view(1, 1, h // df, w // df)  # normalizes the overlap
+            normalization = fold(weighting).view(1, 1, h // df, w // df)
             weighting = weighting.view((1, 1, kernel_size[0] // df, kernel_size[1] // df, Ly * Lx))
 
         else:
@@ -817,17 +1212,36 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, return_x=False):
+        """
+        バッチデータから入力を取得し、必要に応じて処理するメソッド。
+        :param batch: データバッチ。
+        :param k: バッチ内のキー。
+        :param return_first_stage_outputs: 最初のステージの出力を返すかどうか。
+        :param force_c_encode: 条件付け情報を強制的にエンコードするかどうか。
+        :param cond_key: 条件付けに使用するキー。
+        :param return_original_cond: 元の条件付け情報を返すかどうか。
+        :param bs: 処理するバッチサイズ。
+        :param return_x: 入力画像を返すかどうか。
+        :return: 処理された入力データのリスト。
+        """
+        # スーパークラスのget_inputを使用して入力を取得。
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
         x = x.to(self.device)
+
+        # 最初のステージのエンコーダーを使用してポステリアを計算。
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
+        # 条件付けキーが設定されており、強制的にnull条件付けを行わない場合の処理。
         if self.model.conditioning_key is not None and not self.force_null_conditioning:
             if cond_key is None:
                 cond_key = self.cond_stage_key
+
+            # 条件付けデータの取得。
             if cond_key != self.first_stage_key:
+                # 異なる種類の条件付けデータを取得。
                 if cond_key in ['caption', 'coordinates_bbox', "txt"]:
                     xc = batch[cond_key]
                 elif cond_key in ['class_label', 'cls']:
@@ -836,6 +1250,8 @@ class LatentDiffusion(DDPM):
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
                 xc = x
+
+            # 条件付けデータのエンコード処理。
             if not self.cond_stage_trainable or force_c_encode:
                 if isinstance(xc, dict) or isinstance(xc, list):
                     c = self.get_learned_conditioning(xc)
@@ -846,17 +1262,21 @@ class LatentDiffusion(DDPM):
             if bs is not None:
                 c = c[:bs]
 
+            # 位置エンコーディングの使用。
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 ckey = __conditioning_keys__[self.model.conditioning_key]
                 c = {ckey: c, 'pos_x': pos_x, 'pos_y': pos_y}
 
         else:
+            # null条件付けの場合の処理。
             c = None
             xc = None
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
+
+        # 出力リストの作成。
         out = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
@@ -869,78 +1289,150 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
+        """
+        エンコードされた潜在変数を最初のステージのデコーダーを使用して元の画像にデコードするメソッド。
+        :param z: エンコードされた潜在変数。
+        :param predict_cids: コードブックインデックスを予測するかどうか。
+        :param force_not_quantize: 量子化を行わないかどうかのフラグ。
+        :return: デコードされた画像。
+        """
+        # コードブックインデックスを予測する場合の処理。
         if predict_cids:
+            # zが4次元の場合（バッチサイズ、高さ、幅、チャネル）、最大確率のインデックスを取得。
             if z.dim() == 4:
                 z = torch.argmax(z.exp(), dim=1).long()
+            # インデックスに基づいてコードブックエントリを取得し、適切な形状に再配置。
             z = self.first_stage_model.quantize.get_codebook_entry(z, shape=None)
             z = rearrange(z, 'b h w c -> b c h w').contiguous()
 
+        # スケールファクターを用いて潜在変数zをスケーリング。
         z = 1. / self.scale_factor * z
+
+        # 最初のステージのデコーダーでデコードを行い、結果を返す。
         return self.first_stage_model.decode(z)
 
     @torch.no_grad()
     def encode_first_stage(self, x):
+        """
+        最初のステージのモデルを使用して入力xをエンコードするメソッド。
+        :param x: 入力画像。
+        :return: エンコードされた潜在変数。
+        """
         return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
+        """
+        トレーニングと検証の共有ステップを定義するメソッド。
+        入力データと条件付けデータを取得し、損失を計算する。
+        :param batch: 入力バッチデータ。
+        :return: 計算された損失。
+        """
         x, c = self.get_input(batch, self.first_stage_key)
         loss = self(x, c)
         return loss
 
     def forward(self, x, c, *args, **kwargs):
+        """
+        モデルのフォワードパスを定義するメソッド。
+        ランダムな拡散タイムステップを選択し、条件付けデータを使用して損失を計算する。
+        :param x: 入力画像。
+        :param c: 条件付けデータ。
+        :return: 計算された損失。
+        """
+        # ランダムな拡散タイムステップを選択
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+
+        # 条件付けキーが設定されている場合の処理
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
+                # 学習済みの条件付け情報を取得
                 c = self.get_learned_conditioning(c)
-            if self.shorten_cond_schedule:  # TODO: drop this option
+            if self.shorten_cond_schedule:  # TODO: このオプションを廃止するか検討
+                # 条件付けスケジュールに従って拡散
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
+
         return self.p_losses(x, c, t, *args, **kwargs)
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
+        """
+        モデルにノイズ付き入力と条件付けデータを適用し、再構築された画像を取得するメソッド。
+        :param x_noisy: ノイズが加えられた入力画像。
+        :param t: 拡散プロセスのタイムステップ。
+        :param cond: 条件付けデータ。
+        :param return_ids: 返却するのがIDかどうか。
+        :return: 再構築された画像、またはモデルの出力。
+        """
+        # 条件付けデータが辞書型の場合（ハイブリッドケース）
         if isinstance(cond, dict):
-            # hybrid case, cond is expected to be a dict
-            pass
+            pass  # 何もせずにそのまま使用
         else:
+            # 条件付けデータがリストでない場合、リストに変換
             if not isinstance(cond, list):
                 cond = [cond]
+            # モデルの条件付けキーに応じて、条件付けデータを辞書に変換
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond}
 
+        # モデルにノイズ付き入力と条件付けデータを適用
         x_recon = self.model(x_noisy, t, **cond)
 
+        # モデルの出力がタプルの場合、return_idsがFalseなら最初の要素を返す
         if isinstance(x_recon, tuple) and not return_ids:
             return x_recon[0]
         else:
             return x_recon
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
+        """
+        ノイズ付きの入力からノイズを予測するメソッド。
+        :param x_t: 拡散プロセス中の特定のステップにおけるノイズが加えられた画像。
+        :param t: 拡散プロセス中のタイムステップ。
+        :param pred_xstart: 再構築されたノイズがない元の画像。
+        :return: 予測されたノイズ。
+        """
+        # 予測されたノイズを計算するための式。アルファ値を用いてスケーリングされる。
         return (extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart) / \
                extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
 
     def _prior_bpd(self, x_start):
         """
-        Get the prior KL term for the variational lower-bound, measured in
-        bits-per-dim.
-        This term can't be optimized, as it only depends on the encoder.
-        :param x_start: the [N x C x ...] tensor of inputs.
-        :return: a batch of [N] KL values (in bits), one per batch element.
+        変分下限の事前KL項をビット毎次元で取得するメソッド。
+        この項はエンコーダーにのみ依存し、最適化することはできない。
+        :param x_start: ノイズがない入力画像。
+        :return: バッチ要素ごとのKL値のバッチ（ビット単位）。
         """
         batch_size = x_start.shape[0]
+        # 最後のタイムステップを選択
         t = torch.tensor([self.num_timesteps - 1] * batch_size, device=x_start.device)
+        # qの平均と分散を取得
         qt_mean, _, qt_log_variance = self.q_mean_variance(x_start, t)
+        # 事前KL項を計算
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
+        # 平均値を計算し、自然対数の底で割ってビット毎次元に変換
         return mean_flat(kl_prior) / np.log(2.0)
 
     def p_losses(self, x_start, cond, t, noise=None):
+        """
+        モデルの損失を計算するメソッド。
+        :param x_start: 元のノイズがない画像。
+        :param cond: 条件付けデータ。
+        :param t: 拡散のタイムステップ。
+        :param noise: 加えるノイズ（指定されていなければランダムに生成）。
+        :return: 計算された損失と、損失に関する詳細情報を含む辞書。
+        """
+        # ノイズを生成または指定されたノイズを使用
         noise = default(noise, lambda: torch.randn_like(x_start))
+        # 拡散プロセスをシミュレートしてノイズ付き画像を生成
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        # モデルにノイズ付き画像と条件付けデータを適用
         model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
 
+        # 損失のターゲットを決定
         if self.parameterization == "x0":
             target = x_start
         elif self.parameterization == "eps":
@@ -950,18 +1442,20 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
+        # シンプルな損失を計算
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
+        # ログ分散に基づく追加の損失計算
         logvar_t = self.logvar[t].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
             loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
             loss_dict.update({'logvar': self.logvar.data.mean()})
 
         loss = self.l_simple_weight * loss.mean()
 
+        # 変分下限の損失を計算
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
@@ -972,16 +1466,33 @@ class LatentDiffusion(DDPM):
 
     def p_mean_variance(self, x, c, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
                         return_x0=False, score_corrector=None, corrector_kwargs=None):
+        """
+        モデルの予測平均と分散を計算するメソッド。
+        :param x: ノイズ付きの入力画像。
+        :param c: 条件付けデータ。
+        :param t: 拡散のタイムステップ。
+        :param clip_denoised: 再構築された画像をクリップするかどうか。
+        :param return_codebook_ids: コードブックのIDを返すかどうか。
+        :param quantize_denoised: 再構築された画像を量子化するかどうか。
+        :param return_x0: 元の画像を返すかどうか。
+        :param score_corrector: スコア補正関数（オプション）。
+        :param corrector_kwargs: スコア補正関数のキーワード引数。
+        :return: 予測平均、分散、（オプションで）ログ分散、その他のオプション出力。
+        """
         t_in = t
+        # モデルにノイズ付き入力と条件付けデータを適用
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
 
+        # スコア補正関数が指定されている場合、適用
         if score_corrector is not None:
             assert self.parameterization == "eps"
             model_out = score_corrector.modify_score(self, model_out, x, t, c, **corrector_kwargs)
 
+        # コードブックIDの処理
         if return_codebook_ids:
             model_out, logits = model_out
 
+        # パラメータ化に基づいて再構築された画像を計算
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
@@ -989,11 +1500,17 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
+        # 再構築された画像のクリップ処理
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
+        # 再構築された画像の量子化処理
         if quantize_denoised:
             x_recon, _, [_, _, indices] = self.first_stage_model.quantize(x_recon)
+
+        # 予測平均、分散、ログ分散を計算
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+
+        # オプションの出力を返す
         if return_codebook_ids:
             return model_mean, posterior_variance, posterior_log_variance, logits
         elif return_x0:
@@ -1005,12 +1522,31 @@ class LatentDiffusion(DDPM):
     def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False,
                  return_codebook_ids=False, quantize_denoised=False, return_x0=False,
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None):
+        """
+        特定のタイムステップにおいてモデルからサンプルを生成するメソッド。
+        :param x: ノイズ付き入力画像。
+        :param c: 条件付けデータ。
+        :param t: 拡散プロセスのタイムステップ。
+        :param clip_denoised: 再構築画像をクリップするかどうか。
+        :param repeat_noise: ノイズを繰り返すかどうか。
+        :param return_codebook_ids: コードブックIDを返すかどうか。
+        :param quantize_denoised: 再構築画像を量子化するかどうか。
+        :param return_x0: 元の画像を返すかどうか。
+        :param temperature: ノイズの温度。
+        :param noise_dropout: ノイズのドロップアウト率。
+        :param score_corrector: スコア補正関数。
+        :param corrector_kwargs: スコア補正関数のキーワード引数。
+        :return: 生成されたサンプル、およびオプションの追加出力。
+        """
         b, *_, device = *x.shape, x.device
+        # 予測平均と分散を取得
         outputs = self.p_mean_variance(x=x, c=c, t=t, clip_denoised=clip_denoised,
                                        return_codebook_ids=return_codebook_ids,
                                        quantize_denoised=quantize_denoised,
                                        return_x0=return_x0,
                                        score_corrector=score_corrector, corrector_kwargs=corrector_kwargs)
+
+        # 出力の取得と処理
         if return_codebook_ids:
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
@@ -1019,12 +1555,14 @@ class LatentDiffusion(DDPM):
         else:
             model_mean, _, model_log_variance = outputs
 
+        # ノイズの生成と適用
         noise = noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
-        # no noise when t == 0
+        # tが0の時はノイズを加えない
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
+        # サンプルの生成
         if return_codebook_ids:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
